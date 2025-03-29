@@ -1,0 +1,226 @@
+import pandas as pd
+import xgboost as xgb
+from sklearn.model_selection import RandomizedSearchCV, KFold, train_test_split
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from scipy.stats import uniform, randint
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib
+import shap
+from statsmodels.nonparametric.smoothers_lowess import lowess
+
+plt.rcParams['font.sans-serif'] = ['SimHei']  # 使用黑体
+plt.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
+
+# 读取数据
+data = pd.read_csv("urban.csv", encoding="utf-8")
+cols = ['PTCD', 'RIQ', 'DNBS', 'DNMS', 'A', 'FD', 'SCR', 'MBA', 'MBH', 'BD', 'FAR', 'RPOI', 'EPOI', 'SPOI', 'HP', 'POP']
+X = data[cols]
+y = data['大众归一']
+
+# 变换 y，提高线性关系（对数变换）
+y_transformed = np.log1p(y)
+
+# 划分数据集（80% 训练集，20% 测试集）
+X_train, X_test, y_train_transformed, y_test_transformed = train_test_split(X, y_transformed, test_size=0.2, random_state=42)
+
+# 从训练集中再划分 10% 作为验证集
+X_train_sub, X_valid, y_train_sub, y_valid = train_test_split(X_train, y_train_transformed, test_size=0.1, random_state=42)
+
+# 定义 XGBoost 回归模型
+model = xgb.XGBRegressor(objective="reg:squarederror", eval_metric="rmse", random_state=42)
+
+# 定义超参数搜索空间
+
+# 定义超参数搜索空间
+param_dist = {'n_estimators': randint(100, 800),
+              'max_depth': randint(3, 5),
+              'learning_rate': uniform(0.001, 0.1),    'subsample': uniform(0.7, 0.2),
+              'colsample_bytree': uniform(0.6, 0.4),    'reg_alpha': uniform(2, 10),
+              'reg_lambda': uniform(1, 5),}
+
+
+
+
+# K 折交叉验证（K=10）
+kf = KFold(n_splits=10, shuffle=True, random_state=42)
+
+# 进行随机搜索 + 交叉验证
+random_search = RandomizedSearchCV(
+    model,
+    param_distributions=param_dist,
+    n_iter=20,
+    cv=kf,
+    scoring='r2',
+    n_jobs=-1,
+    random_state=42
+)
+
+# 训练模型并添加早停
+random_search.fit(
+    X_train_sub, y_train_sub,
+    eval_set=[(X_valid, y_valid)],  # 早停使用验证集
+    early_stopping_rounds=20,  # 如果连续 20 轮无提升，则停止训练
+    verbose=True
+)
+
+# 输出最佳参数和最佳 R² 分数
+print("最佳参数:", random_search.best_params_)
+print("最佳 R²:", random_search.best_score_)
+
+# 获取最终的训练结果
+best_model = random_search.best_estimator_
+
+# 在训练集上进行预测
+y_train_pred_transformed = best_model.predict(X_train)
+
+# 反变换预测值
+y_train_pred = np.expm1(y_train_pred_transformed)
+y_train_true = np.expm1(y_train_transformed)
+
+# 计算训练集上的评估指标
+train_r2 = r2_score(y_train_true, y_train_pred)
+train_mse = mean_squared_error(y_train_true, y_train_pred)
+train_mae = mean_absolute_error(y_train_true, y_train_pred)
+train_rmse = np.sqrt(train_mse)
+
+# 输出训练集上的评估结果
+print("训练集上的 R²:", train_r2)
+print("训练集上的 MSE:", train_mse)
+print("训练集上的 MAE:", train_mae)
+print("训练集上的 RMSE:", train_rmse)
+
+# 在测试集上进行预测
+y_pred_transformed = best_model.predict(X_test)
+
+# 反变换预测值
+y_pred = np.expm1(y_pred_transformed)
+y_true = np.expm1(y_test_transformed)
+
+# 计算测试集上的评估指标
+final_r2 = r2_score(y_true, y_pred)
+final_mse = mean_squared_error(y_true, y_pred)
+final_mae = mean_absolute_error(y_true, y_pred)
+final_rmse = np.sqrt(final_mse)
+
+# 输出测试集上的评估结果
+print("测试集上的最终 R²:", final_r2)
+print("测试集上的最终 MSE:", final_mse)
+print("测试集上的最终 MAE:", final_mae)
+print("测试集上的最终 RMSE:", final_rmse)
+
+# ------------------ 🔹 SHAP 解释 ------------------
+#explainer = shap.TreeExplainer(best_model)
+#shap_values = explainer.shap_values(X)
+#print(shap_values.shape)
+
+
+# SHAP 计算
+explainer = shap.TreeExplainer(best_model)
+shap_values = explainer.shap_values(X)
+
+# 反变换 SHAP 解释值，使其与 y_pred 处于相同尺度
+shap_values_expm1 = np.expm1(shap_values)
+
+# SHAP summary plot
+shap.summary_plot(shap_values_expm1, X)
+
+
+
+# 选择一个样本进行解释
+j = 13
+player_explainer = pd.DataFrame()
+player_explainer['feature'] = cols
+player_explainer['feature_value'] = X.iloc[j].values
+player_explainer['shap_value'] = shap_values[j]
+print(player_explainer)
+
+shap.initjs()
+
+# SHAP summary plot
+plt.figure(facecolor='white')
+shap.summary_plot(shap_values, X, show=False)
+ax = plt.gca()
+ax.set_facecolor('white')
+ax.grid(True, axis='x', linestyle='--', linewidth=0.3, color='gray')
+ax.spines['bottom'].set_linewidth(1)
+ax.spines['left'].set_linewidth(1)
+ax.spines['top'].set_linewidth(1)
+ax.spines['right'].set_linewidth(1)
+ax.spines['bottom'].set_color('black')
+ax.spines['left'].set_color('black')
+ax.spines['top'].set_color('white')
+ax.spines['right'].set_color('white')
+ax.xaxis.label.set_color('black')
+ax.yaxis.label.set_color('black')
+ax.tick_params(axis='x', colors='black')
+ax.tick_params(axis='y', colors='black')
+plt.show()
+
+# SHAP dependence plot
+plt.figure(facecolor='white')
+shap.dependence_plot('RIQ', shap_values, X, interaction_index=None, show=False)
+#shap.dependence_plot('EPOI', shap_values, data[cols], interaction_index='EPOI', show=False)
+ax = plt.gca()
+ax.set_facecolor('white')
+ax.spines['bottom'].set_linewidth(1)
+ax.spines['left'].set_linewidth(1)
+ax.spines['top'].set_linewidth(1)
+ax.spines['right'].set_linewidth(1)
+ax.spines['bottom'].set_color('black')
+ax.spines['left'].set_color('black')
+ax.spines['top'].set_color('white')
+ax.spines['right'].set_color('white')
+ax.xaxis.label.set_color('black')
+ax.yaxis.label.set_color('black')
+ax.tick_params(axis='x', colors='black')
+ax.tick_params(axis='y', colors='black')
+plt.axhline(y=0, color='black', linestyle='--', linewidth=0.5)
+
+# 添加拟合曲线
+smoothed = lowess(shap_values[:, cols.index('RIQ')], X['RIQ'], frac=0.2)
+plt.plot(smoothed[:, 0], smoothed[:, 1], color='orange', linewidth=2)
+ax.set_ylabel('SHAP Value', color='black', fontsize=12)
+plt.show()
+
+fig, ax1 = plt.subplots(figsize=(12, 8), dpi=100)  # 调整图形大小
+
+# Bee Swarm plot
+shap.summary_plot(shap_values, X, feature_names=X.columns, plot_type="dot", show=False, color_bar=True)
+
+ax1 = plt.gca()
+
+# 创建第二个坐标轴
+ax2 = ax1.twiny()
+
+# Feature Importance plot
+shap.summary_plot(shap_values, X, plot_type="bar", show=False)
+
+# 调整图形位置，避免重叠
+plt.gca().set_position([0.1, 0.5, 0.8, 0.45])  # 适当调整位置
+
+# 添加水平线以便参考
+ax2.axhline(y=13, color='gray', linestyle='-', linewidth=1)
+
+# 修改条形图透明度
+bars = ax2.patches
+for bar in bars:
+    bar.set_alpha(0.4)  # 调整透明度
+
+# 设置标签和字体大小
+ax1.set_xlabel('Shapley Value Contribution (Bee Swarm)', fontsize=12)
+ax2.set_xlabel('Mean Shapley Value (Feature Importance)', fontsize=12)
+ax2.xaxis.set_label_position('top')
+ax2.xaxis.tick_top()
+ax1.set_ylabel('Features', fontsize=12)
+
+# 适当调整字体大小
+plt.xticks(fontsize=10)
+plt.yticks(fontsize=10)
+
+# 调整整体布局，以防止标签重叠
+plt.tight_layout()
+
+# 保存图像
+plt.savefig("SHAP_combined_with_top_line_corrected.pdf", format='pdf', bbox_inches='tight')
+plt.show()
